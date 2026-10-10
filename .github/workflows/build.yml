@@ -63,12 +63,23 @@ jobs:
   # Wall clock for the whole run is now the *slower* of the two lanes, not
   # their sum. Setup is shared through .github/actions/setup-toolchain so
   # both lanes see a byte-identical toolchain.
+  #
+  # Both lanes MUST check out (recursively, submodules and all) as their first
+  # step, before calling the local action: GitHub resolves a local
+  # action path out of the workspace during "Prepare all required actions",
+  # i.e. before any step runs, so without a preceding checkout the runner
+  # cannot find .github/actions/setup-toolchain at all.
   # ───────────────────────────────────────────────────────────────────────
   assemble:
     name: assemblePure
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
       - name: Set up toolchain
         uses: ./.github/actions/setup-toolchain
         with:
@@ -127,6 +138,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
       - name: Set up toolchain
         uses: ./.github/actions/setup-toolchain
 

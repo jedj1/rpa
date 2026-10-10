@@ -1,7 +1,7 @@
 name: Set up toolchain
 description: >-
-  Shared, identical setup for every build job: submodules, JDK 17, Android SDK,
-  the native build caches (optional), web-ui node_modules, bun, pnpm and Gradle.
+  Shared, identical setup for every build job: JDK 17, Android SDK, the native
+  build caches (optional), web-ui node_modules, bun, pnpm and Gradle.
   Kept in one place so the apk and tests lanes stay byte-for-byte equivalent — a
   divergence here would let one lane pass on a toolchain the other never saw.
 
@@ -20,10 +20,13 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Checkout with submodules
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
+    # NOTE: there is deliberately no actions/checkout here. GitHub resolves a
+    # local action (./.github/actions/...) out of the workspace *before* the
+    # first step of the job runs, so the repository has to be checked out by the
+    # calling job first — otherwise the runner cannot find this file at all and
+    # fails with "Did you forget to run actions/checkout before running your
+    # local action?". Both jobs therefore check out, with recursive submodules,
+    # as their first step and only then call this action.
 
     - name: Set up JDK 17
       uses: actions/setup-java@v4
