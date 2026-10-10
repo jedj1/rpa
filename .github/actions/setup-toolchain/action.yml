@@ -1,0 +1,145 @@
+name: Set up toolchain
+description: >-
+  Shared, identical setup for every build job: submodules, JDK 17, Android SDK,
+  the native build caches (optional), web-ui node_modules, bun, pnpm and Gradle.
+  Kept in one place so the apk and tests lanes stay byte-for-byte equivalent — a
+  divergence here would let one lane pass on a toolchain the other never saw.
+
+inputs:
+  native-cache:
+    description: >-
+      Restore/save the native build caches (CMake output + ccache). Only the
+      assemble lane needs them: `:app:testPureUnitTest` puts the app's own
+      modules on the *classpath*, which is satisfied by the JVM artifacts and
+      never invokes the external native build, so the tests lane would otherwise
+      download gigabytes and then write an empty directory back over the good
+      one.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout with submodules
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    # setup-android v3 defaults to `sdkmanager tools`, a package that no longer
+    # exists in the SDK repository (exit 1). Pin the list explicitly.
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v3
+      with:
+        packages: 'platform-tools'
+        accept-android-sdk-licenses: true
+
+    # NOTE: do *not* cache $ANDROID_HOME/ndk. The runner image already ships
+    # the NDKs, AGP never downloads one on this project, and the archive is
+    # ~2 GB — saving it alone cost ~7 minutes while restoring it merely
+    # overwrote files that were already on disk.
+
+    # The native cache key has to name the NDK, not just the sources: object
+    # files built by NDK r27 are not interchangeable with ones built by r28, and
+    # the runner image upgrades its NDKs underneath us. Discovering it here
+    # (before the cache steps) keeps that guess out of the key.
+    #
+    # Passed out as a *step output* rather than through GITHUB_ENV on purpose:
+    # env values written by GITHUB_ENV are not reliably readable through the
+    # `env` context in `with:` keys of later steps inside a composite action.
+    # Step outputs are.
+    - name: Detect NDK version
+      id: ndk
+      if: inputs.native-cache == 'true'
+      shell: bash
+      run: |
+        NDK_VER="$(ls -1 "$ANDROID_HOME/ndk" 2>/dev/null | sort -V | tail -1)"
+        echo "version=${NDK_VER:-none}" >> "$GITHUB_OUTPUT"
+        echo "ndk=${NDK_VER:-none}"
+
+    # Restores CMake's own build tree. Unlike the Gradle build cache this does not
+    # depend on AGP having recorded a previous task execution (there is none on a
+    # fresh checkout): CMake/Ninja rebuild exactly what is stale, so an exact key
+    # hit turns the llama.cpp compile into a no-op instead of merely a ccache hit.
+    # The key covers every source and build-file input, so an exact hit can only
+    # ever mean genuinely identical objects.
+    - name: Cache CMake output (native build)
+      if: inputs.native-cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: |
+          llama-cpp/.cxx
+          llama-cpp/.externalNativeBuild
+          workspace/.cxx
+          workspace/.externalNativeBuild
+        key: native-${{ runner.os }}-${{ steps.ndk.outputs.version }}-${{ hashFiles('llama-cpp/native/llama.cpp/**', 'llama-cpp/src/main/cpp/**', 'llama-cpp/build.gradle.kts', 'workspace/src/main/cpp/**', 'workspace/build.gradle.kts', 'gradle/libs.versions.toml') }}
+
+    # ubuntu-latest does not ship ccache, so ANDROID_USE_CCACHE alone did nothing.
+    # Install it before CMake configures the native toolchain. The ccache config is
+    # deliberately left untouched: reconfiguring it invalidates the sloppiness
+    # signature baked into every existing entry, which would cost one full
+    # recompile before the faster state could take effect.
+    - name: Install ccache
+      if: inputs.native-cache == 'true'
+      shell: bash
+      run: |
+        sudo apt-get install -y -qq ccache > /dev/null 2>&1 || {
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ccache
+        }
+        ccache --version | head -1
+
+    # Second native cache, restores on a prefix so the "one source file changed"
+    # case (which the .cxx key misses outright) still gets ccache hits.
+    - name: Cache ccache (native build)
+      if: inputs.native-cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ runner.os }}-${{ hashFiles('llama-cpp/native/llama.cpp/**', 'llama-cpp/src/main/cpp/**', 'workspace/src/main/cpp/**') }}
+        restore-keys: |
+          ccache-${{ runner.os }}-
+
+    # web/build.gradle.kts:installWebUiDeps downloads the web-ui dependency tree
+    # with bun; the vite buildWebUi task depends on it.
+    - name: Cache web-ui node_modules
+      uses: actions/cache@v4
+      with:
+        path: web-ui/node_modules
+        key: webui-${{ runner.os }}-${{ hashFiles('web-ui/bun.lock', 'web-ui/pnpm-lock.yaml') }}
+        restore-keys: |
+          webui-${{ runner.os }}-
+
+    - name: Set up Bun
+      uses: oven-sh/setup-bun@v2
+
+    - name: Set up pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 10
+
+    # setup-gradle also restores the Gradle *build* cache and the dependency cache
+    # (org.gradle.caching=true), which is what keeps :app's Kotlin, KSP, R8 and
+    # resource work, plus buildWebUi's vite output, from repeating on every run.
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@v4
+
+    # web-ui/bun.lock is not committed upstream (only pnpm-lock.yaml is), while
+    # web/build.gradle.kts:installWebUiDeps runs `bun install --frozen-lockfile`.
+    # Bootstrap it the same way a local checkout does: bun migrates the pins.
+    # Must run before the Gradle invocation in either lane.
+    - name: Bootstrap web-ui lockfile
+      shell: bash
+      working-directory: web-ui
+      run: |
+        if [ -f bun.lock ]; then
+          echo "bun.lock present"
+        else
+          echo "bun.lock missing -> generating from pnpm-lock.yaml pins"
+          bun install
+        fi

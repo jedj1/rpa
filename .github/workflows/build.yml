@@ -35,110 +35,53 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # NDK >= r23 reads this and, when ccache is on PATH, routes the C/C++
+  # toolchain through it. llama.cpp (a submodule, thousands of translation
+  # units x arm64-v8a + x86_64) is by far the longest pole, so a warm ccache
+  # turns a full native compile into a near-noop.
+  ANDROID_USE_CCACHE: '1'
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  # Run the native build with a fixed 4 jobs. CMake's Make generator (the
+  # default here) is single-threaded without this, so the llama.cpp compile was
+  # effectively serial on a 4-vCPU runner. Ninja would also do it, but this is a
+  # one-liner and works with the generator already in use.
+  CMAKE_BUILD_PARALLEL_LEVEL: '4'
+
 jobs:
+  # ───────────────────────────────────────────────────────────────────────
+  # Two lanes instead of one, with no dependency between them: each one is
+  # work the old serial job did in sequence, and neither produces input for
+  # the other.
+  #
+  # The old single job ran `assemblePure :app:testPureUnitTest
+  # :ai:testDebugUnitTest` in one Gradle invocation, so nothing overlapped:
+  # the unit tests only started after the APK had finished assembling, and
+  # ccache, bun, pnpm, Gradle, the lockfile bootstrap and the SDK inventory
+  # all ran in front of a 13-20 min Gradle step.
+  #
+  # Wall clock for the whole run is now the *slower* of the two lanes, not
+  # their sum. Setup is shared through .github/actions/setup-toolchain so
+  # both lanes see a byte-identical toolchain.
+  # ───────────────────────────────────────────────────────────────────────
   assemble:
-    name: assemblePure + unit tests
+    name: assemblePure
     runs-on: ubuntu-latest
-    timeout-minutes: 150
-    # NDK >= r23 reads this and, when ccache is on PATH, routes the C/C++
-    # toolchain through it. llama.cpp (a submodule, thousands of translation
-    # units x arm64-v8a + x86_64) is by far the longest pole, so a warm ccache
-    # turns a full native compile into a near-noop.
-    env:
-      ANDROID_USE_CCACHE: '1'
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
+    timeout-minutes: 40
     steps:
-      - name: Checkout with submodules
-        uses: actions/checkout@v4
+      - name: Set up toolchain
+        uses: ./.github/actions/setup-toolchain
         with:
-          submodules: recursive
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      # setup-android v3 defaults to `sdkmanager tools`, a package that no longer
-      # exists in the SDK repository (exit 1). Pin the list explicitly.
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: 'platform-tools'
-          accept-android-sdk-licenses: true
-
-      # NOTE: do *not* cache $ANDROID_HOME/ndk. The runner image already ships
-      # the NDKs, AGP never downloads one on this project, and the archive is
-      # ~2 GB — saving it alone cost ~7 minutes while restoring it merely
-      # overwrote files that were already on disk.
-      - name: Install ccache
-        run: |
-          # ubuntu-latest does not ship ccache, so ANDROID_USE_CCACHE alone did
-          # nothing. Install it before CMake configures the native toolchain.
-          sudo apt-get install -y -qq ccache > /dev/null 2>&1 || {
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq ccache
-          }
-          ccache --version | head -1
-
-      - name: Cache ccache (native build)
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ccache-${{ runner.os }}-${{ hashFiles('llama-cpp/native/llama.cpp/**', 'llama-cpp/src/main/cpp/**', 'workspace/src/main/cpp/**') }}
-          restore-keys: |
-            ccache-${{ runner.os }}-
-
-      # web/build.gradle.kts:installWebUiDeps downloads the web-ui dependency
-      # tree with bun; the vite buildWebUi task depends on it.
-      - name: Cache web-ui node_modules
-        uses: actions/cache@v4
-        with:
-          path: web-ui/node_modules
-          key: webui-${{ runner.os }}-${{ hashFiles('web-ui/bun.lock', 'web-ui/pnpm-lock.yaml') }}
-          restore-keys: |
-            webui-${{ runner.os }}-
-
-      - name: Android SDK inventory
-        run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          yes | timeout 180 sdkmanager --licenses > /dev/null 2>&1 || true
-          for d in platforms build-tools ndk cmake; do
-            echo "--- $d"
-            ls "$ANDROID_HOME/$d" 2>/dev/null || echo "(none)"
-          done
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+          native-cache: 'true'
 
       - name: Show toolchain versions
         run: |
           java -version
           bun --version
           pnpm --version
+          nproc
           echo "--- ccache ---"
           which ccache && ccache --version && ccache -s || echo "ccache NOT installed"
-
-      # web-ui/bun.lock is not committed upstream (only pnpm-lock.yaml is), while
-      # web/build.gradle.kts:installWebUiDeps runs `bun install --frozen-lockfile`.
-      # Bootstrap it the same way a local checkout does: bun migrates the pins.
-      - name: Bootstrap web-ui lockfile
-        working-directory: web-ui
-        run: |
-          if [ -f bun.lock ]; then
-            echo "bun.lock present"
-          else
-            echo "bun.lock missing -> generating from pnpm-lock.yaml pins"
-            bun install
-          fi
 
       # Single Gradle invocation: one daemon, one configuration phase. Build only
       # the shipping variant ("pure": R8 + optimized resource shrinking, keep rules
@@ -148,11 +91,9 @@ jobs:
       # artifact nothing shipped. The published APK is `app-*-pure-unsigned.apk`,
       # re-signed on the VPS with p2.keystore (dl2.sh apk-pure).
       #
-      # :ai:testDebugUnitTest is listed explicitly: :app:testPureUnitTest does not
-      # run the library modules' tests, so the provider request-shape tests in
-      # :ai never executed in CI. They are plain JVM tests (android.util.Log is
-      # stubbed via returnDefaultValues), so this is seconds, not minutes.
-      - name: Assemble pure APK + unit tests
+      # `:app:testPureUnitTest` and `:ai:testDebugUnitTest` live in the tests
+      # lane now, so this lane finishes as soon as the APK exists.
+      - name: Assemble pure APK
         env:
           # Fast lane: a push to a non-master branch (feat/**) skips the release
           # lint pass. master pushes and pull requests keep lintVital as the
@@ -164,14 +105,10 @@ jobs:
             echo "fast lane: -PskipLintVital"
             FLAGS="-PskipLintVital"
           fi
-          ./gradlew :app:assemblePure :app:testPureUnitTest :ai:testDebugUnitTest $FLAGS --stacktrace
+          ./gradlew :app:assemblePure $FLAGS --stacktrace --parallel --build-cache
 
       - name: Show pure APK sizes
         run: ls -la app/build/outputs/apk/pure/*.apk || true
-
-      - name: Show ccache stats
-        if: always()
-        run: ccache -s -v || true
 
       - name: Upload pure APK
         uses: actions/upload-artifact@v4
@@ -180,6 +117,43 @@ jobs:
           path: app/build/outputs/apk/pure/*.apk
           if-no-files-found: error
           retention-days: 14
+
+      - name: Show ccache stats
+        if: always()
+        run: ccache -s -v || true
+
+  tests:
+    name: unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Set up toolchain
+        uses: ./.github/actions/setup-toolchain
+
+      - name: Show toolchain versions
+        run: |
+          java -version
+          bun --version
+          pnpm --version
+          nproc
+
+      # :ai:testDebugUnitTest is listed explicitly: :app:testPureUnitTest does not
+      # run the library modules' tests, so the provider request-shape tests in
+      # :ai never executed in CI. They are plain JVM tests (android.util.Log is
+      # stubbed via returnDefaultValues), so this is seconds, not minutes.
+      #
+      # Same lint gating as the assemble lane, so a red release gate still
+      # fails on the branch that carries it.
+      - name: Run unit tests
+        env:
+          SKIP_LINT: ${{ github.event_name == 'push' && github.ref != 'refs/heads/master' }}
+        run: |
+          FLAGS=""
+          if [ "$SKIP_LINT" = "true" ]; then
+            FLAGS="-PskipLintVital"
+          fi
+          ./gradlew :app:testPureUnitTest :ai:testDebugUnitTest $FLAGS \
+            --stacktrace --parallel --build-cache
 
       - name: Upload unit test report
         if: always()
