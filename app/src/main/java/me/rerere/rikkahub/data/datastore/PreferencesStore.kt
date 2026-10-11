@@ -25,6 +25,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.Transient
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.decodeFromJsonElement
 import me.rerere.ai.core.MessageRole
@@ -495,11 +496,7 @@ class SettingsStore(
                         SubAgentDefaults.MIN_GLOBAL_CONCURRENCY_CAP,
                         SubAgentDefaults.MAX_GLOBAL_CONCURRENCY_CAP,
                     ),
-                // 必须读回: 上面 update 里写了 DYNAMIC_COLOR, 这里若缺这一行, Settings 的默认值
-                // dynamicColor = true 会永远盖掉用户的选择 —— 表现为「动态取色随机失效/重启后回退」。
-                // `!= false` 而不是 `?: true`: 没有该键(全新安装/升级)时同样按 true 处理, 但
-                // 用户显式关闭(false)时不再被当成缺失值覆盖。
-                dynamicColor = preferences[DYNAMIC_COLOR] != true,
+                    dynamicColor = preferences[DYNAMIC_COLOR] != false,
                 themeId = preferences[THEME_ID] ?: PresetThemes[0].id,
                 customThemes = preferences[CUSTOM_THEMES]?.let { raw ->
                     runCatching { JsonInstant.decodeFromString<List<CustomTheme>>(raw) }.getOrElse {
@@ -1007,4 +1004,333 @@ data class Settings(
     val searchServiceSelected: Int = 0,
     val enableWebFetchTools: Boolean = true,
     /**
-     * Recover a tool call a model wrote as literal reply text (`
+     * Recover a tool call a model wrote as literal reply text (`<tool_call>{…}</tool_call>`)
+     * instead of in the structured field. Some OpenAI-compatible gateways serve models whose chat
+     * template asks for that shape and then stream it as ordinary content, which without this
+     * would both show the markup to the user and never execute the tool. On by default; an escape
+     * hatch for anyone whose model legitimately writes that markup in prose.
+     */
+    val parseTextToolCalls: Boolean = true,
+    val mcpServers: List<McpServerConfig> = emptyList(),
+    val webDavConfig: WebDavConfig = WebDavConfig(),
+    val s3Config: S3Config = S3Config(),
+    val ttsProviders: List<TTSProviderSetting> = DEFAULT_TTS_PROVIDERS,
+    val selectedTTSProviderId: Uuid = DEFAULT_SYSTEM_TTS_ID,
+    val defaultTTSPlaybackSpeed: Float = 1.0f,
+    val asrProviders: List<ASRProviderSetting> = emptyList(),
+    val selectedASRProviderId: Uuid? = null,
+    val modeInjections: List<PromptInjection.ModeInjection> = DEFAULT_MODE_INJECTIONS,
+    val lorebooks: List<Lorebook> = emptyList(),
+    val quickMessages: List<QuickMessage> = emptyList(),
+    val webServerEnabled: Boolean = false,
+    val webServerPort: Int = 8080,
+    val webServerJwtEnabled: Boolean = false,
+    val webServerAccessPassword: String = "",
+    val webServerLocalhostOnly: Boolean = false,
+    /**
+     * Always-available floating ball (quick chat overlay). Off by default: it needs
+     * SYSTEM_ALERT_WINDOW and a persistent foreground service, so it stays strictly opt-in.
+     */
+    val floatingBallEnabled: Boolean = false,
+    /**
+     * Seconds the ball can stay untouched before it tucks itself into the screen edge (only half
+     * of it remains visible, dimmed). Touching it wakes it back up without opening the panel.
+     * `0` disables the auto-tuck.
+     */
+    val floatingBallIdleSeconds: Int = 3,
+    /** Opacity, in percent, that the tucked-away ball fades to so it stays unobtrusive. */
+    val floatingBallHiddenAlpha: Int = 50,
+    /**
+     * ARGB colour of the ball's default (glyph) look. `null` follows the app theme's primary
+     * colour, so the ball re-tints itself whenever the theme / dynamic colour / dark mode changes.
+     */
+    val floatingBallColor: Int? = null,
+    /**
+     * Absolute path to a user-picked image shown as the whole ball (circular crop). Empty string
+     * keeps the built-in themed glyph.
+     */
+    val floatingBallIconPath: String = "",
+    val aiLogLevel: AiLogLevel = AiLogLevel.INFO,
+    val backupReminderConfig: BackupReminderConfig = BackupReminderConfig(),
+    val launchCount: Int = 0,
+) {
+    companion object {
+        // 构造一个用于初始化的settings, 但它不能用于保存，防止使用初始值存储
+        fun dummy() = Settings(init = true)
+    }
+}
+
+@Serializable
+enum class AiLogLevel(val preferenceName: String) {
+    @SerialName("off")
+    OFF("off"),
+    @SerialName("info")
+    INFO("info"),
+    @SerialName("debug")
+    DEBUG("debug");
+
+    companion object {
+        fun fromPreference(value: String?): AiLogLevel = entries.firstOrNull { it.preferenceName == value } ?: INFO
+    }
+}
+
+@Serializable
+data class NetworkSetting(
+    val userAgent: String = "",
+    val proxyUrl: String = "",
+    val proxyUsername: String = "",
+    val proxyPassword: String = "",
+    val enableAutoRetry: Boolean = true,
+    /**
+     * Seconds to wait for the first byte of a streamed model reply before treating the
+     * connection as dead and re-issuing the request on a fresh one. `0` disables the watchdog.
+     * A silently-dead socket otherwise emits nothing and fails nothing, so the 10-minute
+     * transport readTimeout is the only thing that would ever notice - the "thinking forever
+     * with no content" report. Kept well above a legitimate long-context prefill.
+     */
+    val streamFirstOutputTimeoutSeconds: Int = 120,
+)
+
+@Serializable
+enum class ChatFontFamily {
+    @SerialName("default")
+    DEFAULT,
+    @SerialName("serif")
+    SERIF,
+    @SerialName("monospace")
+    MONOSPACE,
+
+    @SerialName("custom")
+    CUSTOM,
+}
+
+@Serializable
+data class DisplaySetting(
+    val userAvatar: Avatar = Avatar.Dummy,
+    val userNickname: String = "",
+    val useAppIconStyleLoadingIndicator: Boolean = true,
+    val showUserAvatar: Boolean = true,
+    val showAssistantBubble: Boolean = false,
+    val bubbleOpacity: Float = 1.0f,
+    val showModelIcon: Boolean = true,
+    val showModelName: Boolean = true,
+    val showDateTimeInMessage: Boolean = false,
+    val showTokenUsage: Boolean = true,
+    val showThinkingContent: Boolean = true,
+    val autoCloseThinking: Boolean = true,
+    val updateCheckDisabledUntilEpochMillis: Long = 0L,
+    val showMessageJumper: Boolean = true,
+    val messageJumperOnLeft: Boolean = false,
+    val fontSizeRatio: Float = 1.0f,
+    val enableMessageGenerationHapticEffect: Boolean = false,
+    val skipCropImage: Boolean = true,
+    val enableNotificationOnMessageGeneration: Boolean = false,
+    val enableLiveUpdateNotification: Boolean = false,
+    val codeBlockAutoWrap: Boolean = false,
+    val codeBlockAutoCollapse: Boolean = false,
+    val showLineNumbers: Boolean = false,
+    val ttsOnlyReadQuoted: Boolean = false,
+    val ttsOnlyReadOutsideBrackets: Boolean = false,
+    val autoPlayTTSAfterGeneration: Boolean = false,
+    val pasteLongTextAsFile: Boolean = false,
+    val pasteLongTextThreshold: Int = 1000,
+    val sendOnEnter: Boolean = false,
+    val enableAutoScroll: Boolean = true,
+    val enableLatexRendering: Boolean = true,
+    val enableBlurEffect: Boolean = false,
+    val chatFontFamily: ChatFontFamily = ChatFontFamily.DEFAULT,
+    val chatCustomFontPath: String = "",
+    val chatCustomFontName: String = "",
+    val enableVolumeKeyScroll: Boolean = false,
+    val volumeKeyScrollRatio: Float = 1.0f,
+)
+
+@Serializable
+data class WebDavConfig(
+    val url: String = "",
+    val username: String = "",
+    val password: String = "",
+    val path: String = "rikkahub_backups",
+    // Backed-up slices. New installs default to everything; a pre-granular `["DATABASE","FILES"]`
+    // still decodes because BackupItem keeps the legacy FILES value, and is expanded on the next
+    // write by BackupItem.normalize.
+    val items: List<BackupItem> = BackupItem.selectable,
+)
+
+@Serializable
+data class BackupReminderConfig(
+    val enabled: Boolean = false,
+    val intervalDays: Int = 7,
+    val lastBackupTime: Long = 0L,
+)
+
+fun Settings.isNotConfigured() = providers.all { it.models.isEmpty() }
+
+fun Settings.findModelById(uuid: Uuid?, fallback: Uuid? = null): Model? {
+    if (uuid == null && fallback == null) return null
+    return uuid?.let { this.providers.findModelById(it) }
+        ?: fallback?.let { this.providers.findModelById(it) }
+}
+
+fun List<ProviderSetting>.findModelById(uuid: Uuid): Model? {
+    this.forEach { setting ->
+        setting.models.forEach { model ->
+            if (model.id == uuid) {
+                return model
+            }
+        }
+    }
+    return null
+}
+
+fun Settings.getCurrentChatModel(): Model? {
+    return findModelById(this.getCurrentAssistant().chatModelId ?: this.chatModelId)
+}
+
+private const val FALLBACK_CONTEXT_COMPACTION_TARGET_TOKENS = 2_000
+
+/** Returns the configured summary target, defaulting to 1% of the active context. */
+fun Settings.getContextCompactionTargetTokens(contextLength: Int?): Int {
+    val configured = contextCompactionTargetTokensK
+        ?.toLong()
+        ?.coerceAtLeast(1L)
+        ?.times(1_000L)
+    if (configured != null) {
+        return configured.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    }
+    return contextLength
+        ?.takeIf { it > 0 }
+        ?.let { length ->
+            (length.toLong() * DEFAULT_CONTEXT_COMPACTION_TARGET_PERCENT / 100L)
+                .coerceAtLeast(1L)
+                .coerceAtMost(Int.MAX_VALUE.toLong())
+                .toInt()
+        }
+        ?: FALLBACK_CONTEXT_COMPACTION_TARGET_TOKENS
+}
+
+/** Uses the token-threshold setting as the model context ceiling when that mode is active. */
+fun Settings.getCompactionContextLength(model: Model?): Int? =
+    autoCompactionThresholdTokensK
+        .takeIf { autoCompactionThresholdMode == AutoCompactionThresholdMode.TOKENS }
+        ?.toLong()
+        ?.coerceAtLeast(1L)
+        ?.times(1_000L)
+        ?.coerceAtMost(Int.MAX_VALUE.toLong())
+        ?.toInt()
+        ?: model?.contextLength
+
+/**
+ * P2-01 — every assistant lookup funnels through [AssistantResolver]; these extensions stay
+ * for source compatibility but no longer carry logic of their own.
+ */
+fun Settings.getCurrentAssistant(): Assistant =
+    AssistantResolver.current(this.assistants, assistantId)
+
+fun Settings.getAssistantById(id: Uuid): Assistant? =
+    AssistantResolver.byId(this.assistants, id)
+
+fun Settings.findAssistantById(id: Uuid): Assistant? =
+    AssistantResolver.byId(this.assistants, id)
+
+fun Settings.getQuickMessagesOfAssistant(assistant: Assistant) =
+    quickMessages.filter { it.id in assistant.quickMessageIds }
+
+fun Settings.getSelectedTTSProvider(): TTSProviderSetting? {
+    return ttsProviders.find { it.id == selectedTTSProviderId } ?: ttsProviders.firstOrNull()
+}
+
+fun Settings.getSelectedASRProvider(): ASRProviderSetting? {
+    return selectedASRProviderId?.let { id ->
+        asrProviders.find { it.id == id }
+    } ?: asrProviders.firstOrNull()
+}
+
+fun Model.findProvider(providers: List<ProviderSetting>, checkOverwrite: Boolean = true): ProviderSetting? {
+    val provider = findModelProviderFromList(providers) ?: return null
+    val providerOverwrite = this.providerOverwrite
+    if (checkOverwrite && providerOverwrite != null) {
+        return providerOverwrite.copyProvider(models = emptyList())
+    }
+    return provider
+}
+
+private fun Model.findModelProviderFromList(providers: List<ProviderSetting>): ProviderSetting? {
+    providers.forEach { setting ->
+        setting.models.forEach { model ->
+            if (model.id == this.id) {
+                return setting
+            }
+        }
+    }
+    return null
+}
+
+internal val DEFAULT_ASSISTANT_ID = Uuid.parse("0950e2dc-9bd5-4801-afa3-aa887aa36b4e")
+
+/**
+ * Bundled skills shipped enabled-by-default on top of agent-core. The behavioral
+ * `autonomous-agent` skill is auto_load (injected every turn); `openclaw-converter` is lazy
+ * (loaded on demand). Both are seeded to disk by [SkillManager.seedDefaultSkillsIfNeeded] and
+ * added to the default assistants' enabledSkills once via [Settings.autoEnabledDefaultSkills].
+ */
+internal val DEFAULT_AUTO_ENABLED_SKILLS = setOf("autonomous-agent", "openclaw-converter")
+
+internal val DEFAULT_ASSISTANTS = listOf(
+    Assistant(
+        id = DEFAULT_ASSISTANT_ID,
+        name = "",
+        systemPrompt = "",
+        // The agent-core skill bundle (SOUL/HEARTBEAT/TOOLS) ships with the app and is what
+        // teaches every model "you are running on RikkaHub, here are the tools, here is how
+        // to avoid loops". Auto-enabling it on default assistants means new users get an
+        // agent-aware model out of the box without having to discover the skill toggle.
+        enabledSkills = setOf("agent-core") + DEFAULT_AUTO_ENABLED_SKILLS,
+    ),
+    Assistant(
+        id = Uuid.parse("3d47790c-c415-4b90-9388-751128adb0a0"),
+        name = "",
+        systemPrompt = """
+            You are a helpful assistant, called {{char}}, based on model {{model_name}}.
+
+            ## Info
+            - Date: {{cur_date}}
+            - Locale: {{locale}}
+            - Timezone: {{timezone}}
+            - Device Info: {{device_info}}
+            - System Version: {{system_version}}
+            - User Nickname: {{user}}
+
+            ## Hint
+            - If the user does not specify a language, reply in the user's primary language.
+            - Remember to use Markdown syntax for formatting, and use latex for mathematical expressions.
+        """.trimIndent(),
+        enabledSkills = setOf("agent-core") + DEFAULT_AUTO_ENABLED_SKILLS,
+    ),
+)
+
+val DEFAULT_SYSTEM_TTS_ID = Uuid.parse("026a01a2-c3a0-4fd5-8075-80e03bdef200")
+private val DEFAULT_TTS_PROVIDERS = listOf(
+    TTSProviderSetting.SystemTTS(
+        id = DEFAULT_SYSTEM_TTS_ID,
+        name = "",
+    ),
+    TTSProviderSetting.OpenAI(
+        id = Uuid.parse("e36b22ef-ca82-40ab-9e70-60cad861911c"),
+        name = "AiHubMix",
+        baseUrl = "https://aihubmix.com/v1",
+        model = "gpt-4o-mini-tts",
+        voice = "alloy",
+    )
+)
+
+internal val DEFAULT_ASSISTANTS_IDS = DEFAULT_ASSISTANTS.map { it.id }
+
+val DEFAULT_MODE_INJECTIONS = listOf(
+    PromptInjection.ModeInjection(
+        id = Uuid.parse("b87eaf16-f5cd-4ac1-9e4f-b11ae3a61d74"),
+        content = LEARNING_MODE_PROMPT,
+        position = InjectionPosition.AFTER_SYSTEM_PROMPT,
+        name = "Learning Mode"
+    )
+)
