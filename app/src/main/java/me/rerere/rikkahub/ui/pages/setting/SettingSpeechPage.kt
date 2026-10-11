@@ -583,6 +583,14 @@ private fun AddASRProviderButton(onAdd: (ASRProviderSetting) -> Unit) {
                     showBottomSheet = true
                 }
             )
+            DropdownMenuItem(
+                text = { Text("Custom (OpenAI-compatible)") },
+                onClick = {
+                    currentProvider = ASRProviderSetting.Custom()
+                    showTypeMenu = false
+                    showBottomSheet = true
+                }
+            )
         }
     }
 
@@ -762,8 +770,7 @@ private fun TTSProviderItem(
                 ) {
                     Icon(
                         imageVector = HugeIcons.Tools,
-                        contentDescription = stringResource(R.string.setting_tts_page_more_options_content_description)
-                    )
+                        contentDescription = stringResource(R.string.setting_tts_page_more_options_content_description))
                     DropdownMenu(
                         expanded = showDropdownMenu,
                         onDismissRequest = { showDropdownMenu = false }
@@ -852,6 +859,7 @@ private fun ASRProviderItem(
                             is ASRProviderSetting.MiMo -> "MiMo"
                             is ASRProviderSetting.Step -> "Step"
                             is ASRProviderSetting.DashScopeStreaming -> "DashScope Streaming"
+                            is ASRProviderSetting.Custom -> "Custom"
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
