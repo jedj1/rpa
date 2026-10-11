@@ -125,6 +125,43 @@ sealed class ASRProviderSetting {
     }
 
     /**
+     * 用户自定义 OpenAI 兼容 ASR 接入点。
+     *
+     * 覆盖 Groq (whisper-large-v3)、HuggingFace Inference、vLLM、LocalAI、
+     * faster-whisper-server 以及 whisper.cpp 自带的 server —— 它们的转录接口都是
+     * `POST {baseUrl}/audio/transcriptions` multipart，因此一个类即可覆盖
+     * 「自带 key 的免费额度」和「自建服务」两大类，无需为每家各写一个 provider。
+     *
+     * [baseUrl] 可写 `https://api.groq.com/openai/v1` 也可只写
+     * `https://api.groq.com/openai`，控制器会自行补全 `/v1/audio/transcriptions`。
+     * [language] 留空则不下发，由服务端自动识别。
+     */
+    @Serializable
+    @SerialName("asr_custom")
+    data class Custom(
+        override val id: Uuid = Uuid.random(),
+        override val name: String = "Custom ASR",
+        val apiKey: String = "",
+        val baseUrl: String = "",
+        val model: String = "whisper-1",
+        // auto | zh | en | ... ; 留空时不下发 language, 服务端自动识别
+        val language: String = "auto",
+        val sampleRate: Int = 16000,
+        // 每多少秒自动 flush 一次当前缓冲区 (上传识别)。0 = 仅 stop() 时整体上传
+        val segmentDurationSec: Int = 30,
+    ) : ASRProviderSetting() {
+        override fun copyProvider(
+            id: Uuid,
+            name: String,
+        ): ASRProviderSetting {
+            return this.copy(
+                id = id,
+                name = name,
+            )
+        }
+    }
+
+    /**
      * 小米 MiMo ASR (mimo-v2.5-asr)。
      *
      * 与 OpenAIRealtime / DashScope / Volcengine 不同, MiMo ASR 是基于 OpenAI 兼容
@@ -217,6 +254,7 @@ sealed class ASRProviderSetting {
                 Volcengine::class,
                 MiMo::class,
                 Step::class,
+                Custom::class,
             )
         }
     }
