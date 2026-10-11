@@ -18,7 +18,11 @@ private const val REF = "\$ref"
 internal fun ToolSchema.toSchema(): InputSchema {
     val properties = properties ?: JsonObject(emptyMap())
     val root = JsonObject(buildMap {
-        put("type", JsonPrimitive(type))
+        // mcp-kotlin-sdk 0.15.0-rikka.4+: ToolSchema.type 从 String 放宽为 JsonElement?
+        // (可承载 `["object","null"]` 这类联合类型)。这里必须原样透传而不是再包一层
+        // JsonPrimitive —— 否则会退化成把 JsonElement 当字符串，重新引发本就要修掉的
+        // "Expected JsonPrimitive, but had JsonArray"。缺 type 时按既有语义补 "object"。
+        put("type", type ?: JsonPrimitive("object"))
         put("properties", properties)
         defs?.let { put("\$defs", it) }
     })
