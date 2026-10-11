@@ -496,7 +496,7 @@ class SettingsStore(
                         SubAgentDefaults.MIN_GLOBAL_CONCURRENCY_CAP,
                         SubAgentDefaults.MAX_GLOBAL_CONCURRENCY_CAP,
                     ),
-                    dynamicColor = preferences[DYNAMIC_COLOR] != false,
+                dynamicColor = preferences[DYNAMIC_COLOR] != false,
                 themeId = preferences[THEME_ID] ?: PresetThemes[0].id,
                 customThemes = preferences[CUSTOM_THEMES]?.let { raw ->
                     runCatching { JsonInstant.decodeFromString<List<CustomTheme>>(raw) }.getOrElse {
