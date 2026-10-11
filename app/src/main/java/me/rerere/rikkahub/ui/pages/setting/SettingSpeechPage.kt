@@ -770,7 +770,8 @@ private fun TTSProviderItem(
                 ) {
                     Icon(
                         imageVector = HugeIcons.Tools,
-                        contentDescription = stringResource(R.string.setting_tts_page_more_options_content_description))
+                        contentDescription = stringResource(R.string.setting_tts_page_more_options_content_description)
+                                            )
                     DropdownMenu(
                         expanded = showDropdownMenu,
                         onDismissRequest = { showDropdownMenu = false }
