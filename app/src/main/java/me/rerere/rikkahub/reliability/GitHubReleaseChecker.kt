@@ -18,12 +18,10 @@ private const val TAG = "GHReleaseChecker"
  * Checks GitHub Releases for the latest tag of [DEFAULT_REPO] and compares it against the
  * locally-installed [BuildConfig.VERSION_NAME]. Pure HTTP — no caching, no scheduler, no UI.
  * Callers decide when to invoke.
- *
  * Two consumers, one round-trip each:
  *   - [check] → [CheckResult], backing the `check_app_updates` LLM tool.
  *   - [fetchUpdateInfo] → [UpdateInfo], the shape the in-app update card renders and the
  *     same contract upstream RikkaHub serves from its hosted `UPDATE_API_URL`.
- *
  * Tag schema: every release on this fork ships as `vX.Y.Z-pure.N`, where `vX.Y.Z` is the
  * upstream RikkaHub version this fork is built on and `N` is the Pure revision. The
  * newer-than comparator is lexicographic by (X, Y, Z, N); the flavour label itself is
@@ -63,7 +61,24 @@ class GitHubReleaseChecker(
         data class Failed(val message: String) : CheckResult()
     }
 
+    /**
+     * 更新检查总开关。
+     *
+     * 这个 fork 只为自己服务：APK 由 CI 产出，人工下载安装，仓库不对外发布 release。
+     * 因此「检查更新」没有任何意义，只会：
+     *   1. 每次启动向一个没有 release 的仓库（或别人的仓库）发一次无谓请求；
+     *   2. 更糟的是，[DEFAULT_REPO] 一度指向上游 wuyhong715/rikkahub-agent-pure，
+     *      等于用别人的版本号跟自己比较，然后把别人的 APK 推给用户。
+     * 置为 false 时所有入口在发网请之前直接返回 [CheckResult.Disabled]，彻底静默：
+     * 不报错、不提示、不联网。要恢复检查只需改回 true。
+     */
+    private val enabled: Boolean = false
+
     suspend fun check(): CheckResult = withContext(Dispatchers.IO) {
+        if (!enabled) {
+            Log.i(TAG, "Update check disabled (personal fork, no published releases)")
+            return@withContext CheckResult.Disabled
+        }
         val req = Request.Builder()
             .url(latestUrl)
             .get()
@@ -106,6 +121,7 @@ class GitHubReleaseChecker(
     suspend fun fetchUpdateInfo(): UpdateInfo = when (val result = check()) {
         is CheckResult.Available -> result.latest.toUpdateInfo()
         is CheckResult.UpToDate -> result.latest.toUpdateInfo()
+        is CheckResult.Disabled -> throw DisabledUpdateCheckException()
         is CheckResult.Failed -> throw IllegalStateException(result.message)
     }
 
@@ -149,10 +165,21 @@ class GitHubReleaseChecker(
     }
 
     companion object {
-        /** The fork's own repository — releases here are the ones this build can install. */
-        const val DEFAULT_REPO = "wuyhong715/rikkahub-agent-pure"
+        /**
+         * 这个 fork 自己的仓库。仅在把上面的 [enabled] 打开时才会被访问，届时这里必须是
+         * 真正会发布 release 的仓库；因为 fork 不发布 release，所以指向上游只会带来
+         * 「用别人的版本跟自己比较」的错误提示。
+         */
+        const val DEFAULT_REPO = "jedj1/rpa"
     }
 }
+
+/**
+ * 标记「更新检查被主动关闭」。
+ *
+ * 与网络失败区分开：调用方（更新卡片）见到它就知道这是预期状态，不该弹错误Toast。
+ */
+class DisabledUpdateCheckException : Exception("Update check is disabled")
 
 /**
  * Maps a GitHub release onto upstream's [UpdateInfo]. Pure — no Android, no HTTP — so it can
