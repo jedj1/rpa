@@ -1,3 +1,76 @@
+name: build
+
+on:
+  push:
+    branches:
+      - master
+      - 'feat/**'
+      # Maintenance branches (CI tweaks, dependency bumps, docs) build too — they
+      # are still code that will be merged, so they deserve the same gate.
+      - 'chore/**'
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+  pull_request:
+    branches:
+      - master
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ANDROID_USE_CCACHE: '1'
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CMAKE_BUILD_PARALLEL_LEVEL: '4'
+
+jobs:
+  assemble:
+    name: assemblePure
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up toolchain
+        uses: ./.github/actions/setup-toolchain
+        with:
+          native-cache: 'true'
+
+      - name: Show toolchain versions
+        run: |
+          java -version
+          bun --version
+          pnpm --version
+          nproc
+          echo "--- ccache ---"
+          which ccache && ccache --version && ccache -s || echo "ccache NOT installed"
+
+      - name: Assemble pure APK
+        env:
+          SKIP_LINT: ${{ github.event_name == 'push' && github.ref != 'refs/heads/master' }}
+        run: |
+          FLAGS=""
+          if [ "$SKIP_LINT" = "true" ]; then
+            echo "fast lane: -PskipLintVital"
+            FLAGS="-PskipLintVital"
+          fi
+          ./gradlew :app:assemblePure $FLAGS --stacktrace --parallel --build-cache
+
       - name: Show pure APK sizes
         run: ls -la app/build/outputs/apk/pure/*.apk || true
 
@@ -5,15 +78,55 @@
         uses: actions/upload-artifact@v4
         with:
           name: apk-pure
-          # arm64-v8a only. Every phone since ~2015 is arm64; x86_64 is only for
-          # emulators, and the universal APK is the fat superset. Uploading all
-          # three (the old `*.apk` glob) made the artifact ~171MB and cost real
-          # mobile data to download for an APK that never gets installed.
-          #
-          # This is the upload path, NOT the build: `assemblePure` still produces
-          # all three APKs (see splits.abi in app/build.gradle.kts), so changing
-          # it costs no CI time and keeps the other two available on the runner
-          # if anyone ever needs to fetch them by hand.
+          # arm64-v8a only — the old `*.apk` glob packed all three ABI APKs into
+          # the artifact (~171MB) for a download you pay mobile data on. This is
+          # the upload path only; assemblePure still emits all three.
           path: app/build/outputs/apk/pure/*arm64-v8a*.apk
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Show ccache stats
+        if: always()
+        run: ccache -s -v || true
+
+  tests:
+    name: unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up toolchain
+        uses: ./.github/actions/setup-toolchain
+
+      - name: Show toolchain versions
+        run: |
+          java -version
+          bun --version
+          pnpm --version
+          nproc
+
+      - name: Run unit tests
+        env:
+          SKIP_LINT: ${{ github.event_name == 'push' && github.ref != 'refs/heads/master' }}
+        run: |
+          FLAGS=""
+          if [ "$SKIP_LINT" = "true" ]; then
+            FLAGS="-PskipLintVital"
+          fi
+          ./gradlew :app:testPureUnitTest :ai:testDebugUnitTest $FLAGS \
+            --stacktrace --parallel --build-cache
+
+      - name: Upload unit test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report
+          path: |
+            app/build/reports/tests/
+            ai/build/reports/tests/
+          if-no-files-found: ignore
           retention-days: 14
