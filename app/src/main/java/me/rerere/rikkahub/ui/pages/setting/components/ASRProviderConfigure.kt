@@ -38,6 +38,7 @@ fun ASRProviderConfigure(
                     is ASRProviderSetting.MiMo -> "MiMo"
                     is ASRProviderSetting.Step -> "Step"
                     is ASRProviderSetting.DashScopeStreaming -> "DashScope Streaming"
+                    is ASRProviderSetting.Custom -> "Custom"
                 },
                 onValueChange = {},
                 readOnly = true,
@@ -64,6 +65,7 @@ fun ASRProviderConfigure(
             is ASRProviderSetting.MiMo -> MiMoASRConfiguration(setting, onValueChange)
             is ASRProviderSetting.Step -> StepASRConfiguration(setting, onValueChange)
             is ASRProviderSetting.DashScopeStreaming -> DashScopeStreamingASRConfiguration(setting, onValueChange)
+            is ASRProviderSetting.Custom -> CustomASRConfiguration(setting, onValueChange)
         }
     }
 }
@@ -623,6 +625,100 @@ private fun DashScopeStreamingASRConfiguration(
         androidx.compose.material3.Switch(
             checked = setting.keepDialect,
             onCheckedChange = { onValueChange(setting.copy(keepDialect = it)) }
+        )
+    }
+}
+
+/**
+ * 用户自定义 OpenAI 兼容 ASR 接入点的配置表单。
+ *
+ * 覆盖 Groq / HuggingFace Inference / vLLM / LocalAI / faster-whisper-server /
+ * whisper.cpp server —— 这些服务的转录接口都是
+ * `POST {baseUrl}/audio/transcriptions` multipart，因此只需让用户填
+ * baseUrl + key + model 即可。
+ */
+@Composable
+private fun CustomASRConfiguration(
+    setting: ASRProviderSetting.Custom,
+    onValueChange: (ASRProviderSetting) -> Unit
+) {
+    FormItem(
+        label = { Text(stringResource(R.string.setting_asr_configure_base_url)) },
+        description = { Text("OpenAI 兼容服务地址，例如 https://api.groq.com/openai/v1 。填到 /v1 或只填域名都可以。") }
+    ) {
+        OutlinedTextField(
+            value = setting.baseUrl,
+            onValueChange = { onValueChange(setting.copy(baseUrl = it)) },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("https://api.groq.com/openai/v1") }
+        )
+    }
+
+    FormItem(
+        label = { Text(stringResource(R.string.setting_asr_configure_api_key)) },
+        description = { Text("API Key。同时以 Bearer 和 api-key 两种头发送，兼容多数网关。") }
+    ) {
+        OutlinedTextField(
+            value = setting.apiKey,
+            onValueChange = { onValueChange(setting.copy(apiKey = it)) },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("gsk_...") }
+        )
+    }
+
+    FormItem(
+        label = { Text(stringResource(R.string.setting_asr_configure_model)) },
+        description = { Text("模型 ID，例如 whisper-large-v3。") }
+    ) {
+        OutlinedTextField(
+            value = setting.model,
+            onValueChange = { onValueChange(setting.copy(model = it)) },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("whisper-large-v3") }
+        )
+    }
+
+    FormItem(
+        label = { Text(stringResource(R.string.setting_asr_configure_language)) },
+        description = { Text("auto / zh / en。留空由服务端自动识别。") }
+    ) {
+        OutlinedTextField(
+            value = setting.language,
+            onValueChange = { onValueChange(setting.copy(language = it)) },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("auto") }
+        )
+    }
+
+    FormItem(
+        label = { Text(stringResource(R.string.setting_asr_configure_sample_rate)) },
+        description = { Text(stringResource(R.string.setting_asr_configure_mimo_sample_rate_desc)) }
+    ) {
+        OutlinedNumberInput(
+            value = setting.sampleRate,
+            onValueChange = { value ->
+                if (value in 8000..48000) {
+                    onValueChange(setting.copy(sampleRate = value))
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            label = "Sample Rate"
+        )
+    }
+
+    FormItem(
+        label = { Text(stringResource(R.string.setting_asr_configure_segment_duration)) },
+        description = { Text(stringResource(R.string.setting_asr_configure_mimo_segment_desc)) }
+    ) {
+        OutlinedNumberInput(
+            value = setting.segmentDurationSec,
+            onValueChange = { value ->
+                if (value in 0..300) {
+                    onValueChange(setting.copy(segmentDurationSec = value))
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            label = "Segment Duration (s)"
         )
     }
 }
