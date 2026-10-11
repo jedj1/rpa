@@ -59,6 +59,7 @@ class GitHubReleaseChecker(
         data class Available(val current: String, val latest: Release) : CheckResult()
         data class UpToDate(val current: String, val latest: Release) : CheckResult()
         data class Failed(val message: String) : CheckResult()
+        data object Disabled : CheckResult()
     }
 
     /**
