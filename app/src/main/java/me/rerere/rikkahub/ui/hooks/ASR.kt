@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 import me.rerere.asr.ASRController
 import me.rerere.asr.ASRProviderSetting
 import me.rerere.asr.ASRState
+import me.rerere.asr.providers.CustomASRController
 import me.rerere.asr.providers.DashScopeASRController
 import me.rerere.asr.providers.DashScopeStreamingASRController
 import me.rerere.asr.providers.MiMoASRController
@@ -135,6 +136,14 @@ private class CustomAsrStateImpl(
             is ASRProviderSetting.DashScopeStreaming -> {
                 if (provider.apiKey.isBlank()) return null
                 DashScopeStreamingASRController(context, httpClient, provider)
+            }
+
+            // Custom needs BOTH a key and a base URL: without the key every request
+            // 401s, and without a URL there is nothing to dial. Both are surfaced in
+            // the UI rather than failing silently at record time.
+            is ASRProviderSetting.Custom -> {
+                if (provider.apiKey.isBlank() || provider.baseUrl.isBlank()) return null
+                CustomASRController(context, httpClient, provider)
             }
         }
     }
