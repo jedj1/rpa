@@ -1,7 +1,6 @@
 package me.rerere.rikkahub.data.ai.voice
 
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.ui.UIMessage
@@ -10,8 +9,14 @@ import me.rerere.rikkahub.data.ai.GenerationChunk
 import me.rerere.asr.Chunk
 
 /**
- * Adapts [GenerationChunk] (the app's generation stream) onto [Chunk] (what `:speech`'s
- * [me.rerere.asr.VoiceModeController] consumes).
+ * Adapts a [GenerationChunk] stream onto [Chunk], the type `:speech`'s
+ * [me.rerere.asr.VoiceModeController] consumes.
+ *
+ * Takes the Flow as a **parameter** rather than extending it, because
+ * `GenerationChunk` is a `sealed interface` describing *one chunk*, not a
+ * stream — an extension on it would have a single chunk as its receiver and
+ * no stream to collect at all. The stream is produced by
+ * `generateInternal(...): Flow<GenerationChunk>` in GenerationLoop.kt.
  *
  * Two things make this more than a passthrough, and both are easy to get wrong:
  *
@@ -29,7 +34,7 @@ import me.rerere.asr.Chunk
  * `.last()`, because a completed tool call emits a trailing tool-role message.
  *
  * If the assistant text is ever rewritten *shorter* (context compaction, or a fresh
- * assistant message after a tool call), the new text is emitted in full and the offset
+ * assistant message after a tool turn), the new text is emitted in full and the offset
  * resynchronised. Silently dropping it would mean the user never hears what replaced it.
  *
  * **State lives inside the `flow {}` block, per collection.** That is deliberate and
@@ -37,17 +42,9 @@ import me.rerere.asr.Chunk
  * which leaked across every call site — a second voice turn started already "ahead" by
  * whatever the first one emitted, and two concurrent sessions corrupted each other.
  * Collecting the returned Flow a second time must start from zero.
- *
- * **`source` is hoisted out of the lambda on purpose.** Inside a `flow {}` block the
- * implicit receiver is the `ProducerScope`, which shadows the extension receiver — so
- * `this@toVoiceChunks.collect { }` does not resolve and produces a "receiver type mismatch"
- * plus cascading type-inference failures. Capturing `val source = this` in the enclosing
- * function body reaches the Flow through a plain value instead, which always resolves. The
- * `collect` import is required too, since this project imports that extension explicitly
- * everywhere (see ImageGenerationTools.kt, GeminiProvider.kt).
  */
-fun GenerationChunk.toVoiceChunks(): Flow<Chunk> {
-    val source = this
+fun voiceChunksOf(stream: Flow<GenerationChunk>): Flow<Chunk> {
+    val source = stream
     return flow {
         var emittedChars = 0
         source.collect { chunk ->
