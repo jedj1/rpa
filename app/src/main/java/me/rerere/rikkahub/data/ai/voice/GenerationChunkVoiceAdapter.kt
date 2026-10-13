@@ -37,42 +37,36 @@ import me.rerere.asr.Chunk
  * whatever the first one emitted, and two concurrent sessions corrupted each other.
  * Collecting the returned Flow a second time must start from zero.
  *
- * The source Flow is collected through a typed local helper rather than via a `this@`
- * receiver: inside a `flow {}` builder the receiver is the `ProducerScope`, so there is no
- * route to the source Flow object and `this@toVoiceChunks.collect { }` does not compile.
+ * The upstream is collected by capturing it in a local `val` first, then calling `.collect`
+ * on that. It cannot be written as `this@toVoiceChunks.collect { }` because inside a
+ * `flow {}` builder the receiver is the `ProducerScope`, not the source Flow — which is the
+ * compile error two earlier versions hit. And a `transform { }` cannot be used either,
+ * because its lambda gives no access to a per-collection local.
  */
-fun GenerationChunk.toVoiceChunks(): Flow<Chunk> = flow {
-    var emittedChars = 0
-    collectVoiceChunks { chunk ->
-        if (chunk !is GenerationChunk.Messages) return@collectVoiceChunks
-        val assistant = chunk.messages.lastOrNull { it.role == MessageRole.ASSISTANT }
-            ?: return@collectVoiceChunks
+fun GenerationChunk.toVoiceChunks(): Flow<Chunk> {
+    val source = this
+    return flow {
+        var emittedChars = 0
+        source.collect { chunk ->
+            if (chunk !is GenerationChunk.Messages) return@collect
+            val assistant = chunk.messages.lastOrNull { it.role == MessageRole.ASSISTANT }
+                ?: return@collect
 
-        val text = assistant.parts
-            .filterIsInstance<UIMessagePart.Text>()
-            .joinToString(separator = "") { it.text }
+            val text = assistant.parts
+                .filterIsInstance<UIMessagePart.Text>()
+                .joinToString(separator = "") { it.text }
 
-        val delta = when {
-            text.length > emittedChars -> text.substring(emittedChars)
-            // Rewritten shorter: speak the new text rather than losing it.
-            text.isNotEmpty() && text.length < emittedChars -> text
-            else -> null
+            val delta = when {
+                text.length > emittedChars -> text.substring(emittedChars)
+                // Rewritten shorter: speak the new text rather than losing it.
+                text.isNotEmpty() && text.length < emittedChars -> text
+                else -> null
+            }
+            if (delta != null && delta.isNotEmpty()) emit(Chunk.Text(delta))
+            emittedChars = text.length
         }
-        if (delta != null && delta.isNotEmpty()) emit(Chunk.Text(delta))
-        emittedChars = text.length
+        emit(Chunk.Finished)
     }
-    emit(Chunk.Finished)
-}
-
-/**
- * Collects `this` Flow from inside a `flow {}` builder, where the source is not directly
- * reachable. Kept as a tiny local helper so the per-collection state scoping documented on
- * [toVoiceChunks] stays honest.
- */
-private suspend fun Flow<GenerationChunk>.collectVoiceChunks(
-    action: suspend (GenerationChunk) -> Unit,
-) {
-    collect { action(it) }
 }
 
 /** Convenience: one voice turn's utterance, as a user [UIMessage]. */
