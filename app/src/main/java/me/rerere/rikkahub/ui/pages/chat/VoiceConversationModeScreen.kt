@@ -20,8 +20,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -40,6 +38,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import me.rerere.asr.VoiceModeStatus
+import me.rerere.hugeicons.HugeIcons
+import me.rerere.hugeicons.stroke.Cancel01
 import me.rerere.rikkahub.ui.theme.LocalDarkMode
 import kotlin.math.PI
 import kotlin.math.cos
@@ -58,11 +58,10 @@ import kotlin.math.sin
  * [me.rerere.rikkahub.ui.pages.chat.MeshGradientBackground] palette so it does not look
  * bolted on.
  *
- * Strings here are literals rather than `R.string.*` on purpose. `strings.xml` is ~260KB,
- * and this screen's four state labels plus the close and interrupt hints have no
- * translations to preserve (the project ships English only), so there is nothing to
- * localise and no reason to grow a shared resource file for them. This mirrors how
- * DashScopeStreamingASRConfiguration already handles its provider-specific labels.
+ * Strings here are literals rather than `R.string.*` on purpose. This screen's four state
+ * labels plus the close and interrupt hints have no translations to preserve, so there is
+ * nothing to localise and no reason to grow a shared ~260KB resource file for them. This
+ * mirrors how DashScopeStreamingASRConfiguration already carries its labels inline.
  */
 
 /** What the orb is doing, which drives both its colour and its motion. */
@@ -73,7 +72,7 @@ enum class OrbState { Listening, Thinking, Speaking, Failed }
  *
  * Motion reads the wall clock at draw time rather than using
  * `rememberInfiniteTransition`, which would recompute on every display vsync (120fps on a
- * 120Hz screen even while idle). Reading the clock inside the draw lambda means the state
+ * 120Hz screen even while idle). Reading the clock inside the draw lambda means state
  * changes only trigger a redraw, not a recomposition.
  *
  * The blob is a sum of three radial gradients on slightly offset trajectories, which is
@@ -221,7 +220,7 @@ fun VoiceConversationModeScreen(
             ) {
                 IconButton(onClick = onEnd, modifier = Modifier.size(48.dp)) {
                     Icon(
-                        Icons.Filled.Close,
+                        imageVector = HugeIcons.Cancel01,
                         contentDescription = "Close",
                         tint = MaterialTheme.colorScheme.onSurface,
                     )
