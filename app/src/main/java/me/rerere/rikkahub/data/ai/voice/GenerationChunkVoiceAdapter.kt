@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.data.ai.voice
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.ui.UIMessage
@@ -36,37 +37,28 @@ import me.rerere.asr.Chunk
  * which leaked across every call site — a second voice turn started already "ahead" by
  * whatever the first one emitted, and two concurrent sessions corrupted each other.
  * Collecting the returned Flow a second time must start from zero.
- *
- * The upstream is collected by capturing it in a local `val` first, then calling `.collect`
- * on that. It cannot be written as `this@toVoiceChunks.collect { }` because inside a
- * `flow {}` builder the receiver is the `ProducerScope`, not the source Flow — which is the
- * compile error two earlier versions hit. And a `transform { }` cannot be used either,
- * because its lambda gives no access to a per-collection local.
  */
-fun GenerationChunk.toVoiceChunks(): Flow<Chunk> {
-    val source = this
-    return flow {
-        var emittedChars = 0
-        source.collect { chunk ->
-            if (chunk !is GenerationChunk.Messages) return@collect
-            val assistant = chunk.messages.lastOrNull { it.role == MessageRole.ASSISTANT }
-                ?: return@collect
+fun GenerationChunk.toVoiceChunks(): Flow<Chunk> = flow {
+    var emittedChars = 0
+    this@toVoiceChunks.collect { chunk ->
+        if (chunk !is GenerationChunk.Messages) return@collect
+        val assistant = chunk.messages.lastOrNull { it.role == MessageRole.ASSISTANT }
+            ?: return@collect
 
-            val text = assistant.parts
-                .filterIsInstance<UIMessagePart.Text>()
-                .joinToString(separator = "") { it.text }
+        val text = assistant.parts
+            .filterIsInstance<UIMessagePart.Text>()
+            .joinToString(separator = "") { it.text }
 
-            val delta = when {
-                text.length > emittedChars -> text.substring(emittedChars)
-                // Rewritten shorter: speak the new text rather than losing it.
-                text.isNotEmpty() && text.length < emittedChars -> text
-                else -> null
-            }
-            if (delta != null && delta.isNotEmpty()) emit(Chunk.Text(delta))
-            emittedChars = text.length
+        val delta = when {
+            text.length > emittedChars -> text.substring(emittedChars)
+            // Rewritten shorter: speak the new text rather than losing it.
+            text.isNotEmpty() && text.length < emittedChars -> text
+            else -> null
         }
-        emit(Chunk.Finished)
+        if (delta != null && delta.isNotEmpty()) emit(Chunk.Text(delta))
+        emittedChars = text.length
     }
+    emit(Chunk.Finished)
 }
 
 /** Convenience: one voice turn's utterance, as a user [UIMessage]. */
