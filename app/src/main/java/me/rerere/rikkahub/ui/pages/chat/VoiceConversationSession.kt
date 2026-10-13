@@ -1,6 +1,5 @@
 package me.rerere.rikkahub.ui.pages.chat
 
-import android.content.Context
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -9,9 +8,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.platform.LocalContext
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
@@ -20,86 +22,87 @@ import me.rerere.asr.Chunk
 import me.rerere.asr.VoiceModeController
 import me.rerere.asr.VoiceModeState
 import me.rerere.rikkahub.service.ChatService
-import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.components.ui.permission.PermissionRecordAudio
 import me.rerere.rikkahub.ui.components.ui.permission.rememberPermissionState
+import me.rerere.rikkahub.ui.hooks.CustomAsrState
+import me.rerere.rikkahub.ui.hooks.CustomTtsState
 import me.rerere.rikkahub.ui.hooks.rememberCustomAsrState
 import me.rerere.rikkahub.ui.hooks.rememberCustomTtsState
 import org.koin.compose.koinInject
 import kotlin.uuid.Uuid
 
 /**
- * Everything one VCM (Voice Conversation Mode) session needs, in one place.
+ * One VCM (Voice Conversation Mode) session.
  *
- * This is the *only* new logic needed to make voice conversation mode run: the VAD, the
- * state machine, the sentence splitter and the screen already exist. What was missing was
- * something to wire them to the app's ASR, TTS and generation.
+ * This is the only new logic voice conversation mode needed: the VAD, the state machine, the
+ * sentence splitter and the screen already existed, but nothing connected them to the app's
+ * ASR, TTS and generation.
  *
- * The shape follows `rememberCustomAsrState` / `rememberCustomTtsState` so it reads like the
- * rest of the codebase: a `@Composable` returning a state holder, with `DisposableEffect`
- * for teardown.
+ * Shaped like `rememberCustomAsrState` / `rememberCustomTtsState` so it reads like the rest
+ * of the codebase — a plain class, remembered by a `@Composable` and torn down by
+ * `DisposableEffect`.
  *
- * ### The Groq-specific part
+ * ### The Groq-specific part, which is the whole reason this exists
  * A one-shot HTTP provider (Groq, HuggingFace, vLLM, anything self-hosted behind
- * `/audio/transcriptions`) only produces a transcript when its buffer is flushed, which
- * happens either every `segmentDurationSec` or on `stop()`. So client VAD has to *stop*
- * the recogniser to get the text: [onAmplitude] returning true leads to `asr.stop()`, and
- * the final transcript is taken from whatever arrives after that.
+ * `/audio/transcriptions`) only produces a transcript when its buffer flushes, and that
+ * happens either every `segmentDurationSec` or on `stop()`. Streaming providers with
+ * server-side VAD emit `voiceTurn.speechEnded` and never need this.
  *
- * Consequence worth knowing: each utterance costs one HTTP round-trip before the LLM even
- * starts, and there is no live partial transcript on those providers — the sentence appears
- * all at once when the flush lands. The orb still reacts live, because amplitudes come from
- * the microphone rather than from the transcript.
+ * So client VAD has to *stop* the recogniser to obtain the text: [onAmplitude] returning
+ * true leads to `asr.stop()`, and the next transcript that arrives is treated as the final
+ * utterance. `segmentDurationSec = 0` on the provider is what makes this correct — it turns
+ * off the periodic flush so one utterance means exactly one request.
+ *
+ * Consequence worth being honest about: each utterance costs one HTTP round-trip before the
+ * LLM even starts, and there is no live partial transcript on those providers, because the
+ * text only exists once the flush lands. The orb still reacts live, since amplitudes come
+ * from the microphone rather than from the transcript.
  *
  * ### Known limitation: audio focus
- * `rememberCustomAsrState` requests `AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE`, which the
- * platform interprets as "the mic owns audio". While TTS plays a reply, an exclusive
- * request can cause the mic capture to be ducked or dropped depending on OEM, which would
- * break both barge-in and the next turn. This is filed as a follow-up: the request needs to
- * become a shared one (or be re-requested) when the session enters SPEAKING. Until then,
- * expect barge-in to work on some devices and not others, and treat any "not hearing the
- * user mid-reply" report as this and not the VAD.
+ * `CustomAsrStateImpl` requests `AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE`, which tells the
+ * platform the mic owns audio. While TTS plays a reply that can cause capture to be ducked or
+ * dropped depending on OEM, breaking barge-in and the following turn. That request needs to
+ * become shared (or be re-requested) when the session enters SPEAKING — a follow-up, since it
+ * means changing `ASR.kt`'s focus request and therefore every ASR consumer.
  */
 class VoiceConversationSession(
-    private val appContext: Context,
+    private val asr: CustomAsrState,
+    private val tts: CustomTtsState,
     private val chatService: ChatService,
     private val conversationId: Uuid,
-    private val asr: me.rerere.rikkahub.ui.hooks.CustomAsrState,
-    private val tts: me.rerere.rikkahub.ui.hooks.CustomTtsState,
     private val onExit: () -> Unit,
 ) {
     var state: VoiceModeState by mutableStateOf(VoiceModeState())
         private set
 
+    private var scope: CoroutineScope? = null
     private var controller: VoiceModeController? = null
-    private var awaitingFinalTranscript = false
-    private var sessionScope: kotlinx.coroutines.CoroutineScope? = null
 
-    /** True once the recogniser is running and the session is live. */
+    /** True when the recogniser is live and the session should be on screen. */
     val isActive: Boolean get() = state.sessionActive
 
     fun start() {
         if (isActive) return
-        val scope = kotlinx.coroutines.CoroutineScope(
-            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main,
-        )
-        sessionScope = scope
+        val sessionScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+        scope = sessionScope
 
         val created = VoiceModeController(
-            scope = scope,
+            scope = sessionScope,
             onTurn = ::runTurn,
             onStateChange = { state = it },
         )
         controller = created
 
+        // Sentences go straight to the TTS queue; flushCalled=false appends so consecutive
+        // sentences play back-to-back rather than each restarting the queue.
         created.onSpeakSentence = { sentence, flushCalled ->
             tts.speak(sentence, flushCalled)
         }
 
-        // ASR transcripts feed both the live partial text and the final utterance.
         asr.start { transcript ->
             if (awaitingFinalTranscript) {
                 awaitingFinalTranscript = false
+                asrRestartPending = true
                 created.utteranceReady(transcript)
             } else {
                 created.onTranscript(transcript)
@@ -108,41 +111,60 @@ class VoiceConversationSession(
         created.start()
     }
 
+    /** Set while waiting for the recogniser to flush its final transcript. */
+    private var awaitingFinalTranscript = false
+
+    /** Set once a final transcript has been consumed, so the mic can be reopened. */
+    private var asrRestartPending = false
+
     fun stop() {
         awaitingFinalTranscript = false
+        asrRestartPending = false
         asr.stop()
         tts.stop()
         controller?.stop()
         controller = null
-        sessionScope?.cancel()
-        sessionScope = null
+        scope?.cancel()
+        scope = null
     }
 
     /**
-     * One amplitude frame from the recogniser. Drives turn detection while listening and
-     * barge-in while the reply is playing.
+     * Forward one recogniser amplitude frame.
+     *
+     * While LISTENING this is turn detection. While SPEAKING it is barge-in — the mic is
+     * expected to stay open so the user can interrupt, and the check lives here rather than
+     * in [VoiceModeController] because that one ignores amplitudes unless it is listening.
      */
     fun onAmplitude(amplitude: Float) {
         val c = controller ?: return
         if (state.isSpeaking) {
-            // Mic is expected open during playback so the user can interrupt. The check is
-            // here rather than in VoiceModeController because that one deliberately ignores
-            // amplitudes unless it is in Listening.
-            if (amplitude > 0.15f) {
+            if (amplitude > BARGE_IN_THRESHOLD) {
                 tts.stop()
                 c.bargeIn()
             }
             return
         }
         if (c.onAmplitude(amplitude)) {
-            // Turn ended. A one-shot provider only emits its transcript on stop(), so
-            // flush now and wait for the text to arrive through the asr callback.
             awaitingFinalTranscript = true
             asr.stop()
         }
     }
 
-    /** Mirrors TTS state so the loop can close when the queue drains. */
+    /** Reopen the mic after a final transcript has been consumed. */
+    fun resumeListening() {
+        if (!asrRestartPending) return
+        asrRestartPending = false
+        asr.start { transcript ->
+            val c = controller ?: return@start
+            if (awaitingFinalTranscript) {
+                awaitingFinalTranscript = false
+                c.utteranceReady(transcript)
+            } else {
+                c.onTranscript(transcript)
+            }
+        }
+    }
+
     fun onPlaybackFinished() {
         controller?.onPlaybackFinished()
     }
@@ -150,16 +172,17 @@ class VoiceConversationSession(
     /**
      * The LLM hop.
      *
-     * Uses `ChatService.enqueueVoiceMessage`, the same path the existing voice mode uses,
-     * so the conversation history, the tool-approval guards and the "voice owns playback"
-     * semantics are all reused rather than reimplemented. It returns the reply as one
-     * string once generation completes.
+     * Reuses `ChatService.enqueueVoiceMessage` — the same call the existing voice mode
+     * makes — so conversation history, the tool-approval guards and the "voice owns playback"
+     * semantics are inherited instead of reimplemented. It returns the reply as one string
+     * once generation completes.
      *
-     * That means the reply is not sentence-streamed: the first audio starts when the whole
-     * answer is ready. Upgrading to `generateInternal(...)` + `voiceChunksOf(...)` would
-     * give first audio ~300ms after the first sentence, but requires assembling settings,
-     * assistant, model, messages and transformers, and bypasses the message queue — a
-     * larger change than this first wiring.
+     * That means the reply is not sentence-streamed, so the first audio starts when the whole
+     * answer is ready. Upgrading to `generateInternal(...)` + `voiceChunksOf(...)` would give
+     * first audio ~300ms after the first sentence, but it means assembling settings,
+     * assistant, model, messages and transformers, and bypassing the message queue. That is a
+     * larger change than this first wiring, and it is recorded in the VCM plan rather than
+     * silently skipped.
      */
     private fun runTurn(utterance: String): Flow<Chunk> = flow {
         val reply = try {
@@ -174,66 +197,92 @@ class VoiceConversationSession(
         if (text.isNotBlank()) emit(Chunk.Text(text))
         emit(Chunk.Finished)
     }
+
+    companion object {
+        /**
+         * Speaking at all, as opposed to the ~0.15 VAD threshold: this is an interruption
+         * gesture, so it wants to be sensitive. Matches what [VoiceModeController] treats as
+         * speech.
+         */
+        const val BARGE_IN_THRESHOLD = 0.15f
+    }
 }
 
 /**
  * Remembers one VCM session for the lifetime of the composition.
  *
  * @param conversationId the conversation the spoken turns belong to
- * @param onDismiss called when the user closes the voice surface, so the caller can
- *   navigate away. The session itself is stopped here regardless.
+ * @param onDismiss called when the session cannot continue (no ASR provider configured, or
+ *   the recogniser errors), so the caller can close the voice surface.
  */
 @Composable
 fun rememberVoiceConversationSession(
     conversationId: Uuid,
     onDismiss: () -> Unit,
 ): VoiceConversationSession {
-    val context = LocalContext.current
-    val chatService = koinInject<ChatService>()
     val asr = rememberCustomAsrState()
     val tts = rememberCustomTtsState()
+    val chatService = koinInject<ChatService>()
 
-    val session = remember(conversationId) {
-        VoiceConversationSession(
-            appContext = context.applicationContext,
-            chatService = chatService,
-            conversationId = conversationId,
-            asr = asr,
-            tts = tts,
-            onExit = onDismiss,
-        )
-    }
-
-    val scope = rememberCoroutineScope()
-
-    // Amplitudes come from the recogniser, not from a VAD of our own, so they are
-    // collected here and forwarded. One collection per session.
-    LaunchedEffect(session) {
-        asr.state.collectAsStateWithLifecycle().value.let { asrState ->
-            asrState.amplitudes.lastOrNull()?.let { session.onAmplitude(it) }
+    var dismissed by remember { mutableStateOf(false) }
+    fun dismissOnce() {
+        if (!dismissed) {
+            dismissed = true
+            onDismiss()
         }
     }
 
-    // TTS playback state decides when the loop re-opens the mic.
-    val isSpeaking by tts.isSpeaking.collectAsStateWithLifecycle()
-    LaunchedEffect(session, isSpeaking) {
-        if (!isSpeaking && session.state.isSpeaking) session.onPlaybackFinished()
+    val session = remember(conversationId) {
+        VoiceConversationSession(
+            asr = asr,
+            tts = tts,
+            chatService = chatService,
+            conversationId = conversationId,
+            onExit = ::dismissOnce,
+        )
     }
 
-    // The recogniser's own status still matters: a provider error has to surface.
+    // Amplitudes are observed by sampling the state's last frame, because ASRState carries
+    // the ring as a value rather than a flow of frames. snapshotFlow re-emits only when the
+    // ring actually changes, so this does not spin.
     val asrStateValue by asr.state.collectAsStateWithLifecycle()
+    LaunchedEffect(session) {
+        snapshotFlow { asrStateValue.amplitudes.lastOrNull() ?: 0f }
+            .collect { amplitude -> session.onAmplitude(amplitude) }
+    }
+
+    // TTS playback draining is what closes the loop and reopens the mic.
+    val isSpeaking by tts.isSpeaking.collectAsStateWithLifecycle()
+    LaunchedEffect(session, isSpeaking) {
+        if (!isSpeaking && session.state.isSpeaking) {
+            session.onPlaybackFinished()
+            session.resumeListening()
+        }
+    }
+
+    // A provider error must end the session rather than leaving the user on a dead surface.
     LaunchedEffect(session, asrStateValue.status) {
         if (asrStateValue.status == ASRStatus.Error && session.isActive) {
             session.stop()
-            onDismiss()
+            dismissOnce()
         }
     }
 
     DisposableEffect(session) {
         onDispose {
-            scope.launch { session.stop() }
+            session.stop()
         }
     }
 
     return session
 }
+
+/**
+ * Requests the microphone permission before VCM starts, so the session does not open into
+ * an immediately-failed state.
+ *
+ * Returns the permission state; the caller decides whether to start. Mirrors how
+ * `ChatInput` gates its ASR button.
+ */
+@Composable
+fun rememberVoiceConversationPermission() = rememberPermissionState(PermissionRecordAudio)
