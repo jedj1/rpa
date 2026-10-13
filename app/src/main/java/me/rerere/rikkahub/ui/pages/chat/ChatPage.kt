@@ -79,6 +79,7 @@ import me.rerere.rikkahub.ui.components.ai.FilesPicker
 import me.rerere.rikkahub.ui.components.ai.SearchMode
 import me.rerere.rikkahub.ui.components.ai.completion.WorkspaceCompletionProvider
 import me.rerere.rikkahub.ui.components.ai.rememberChatAttachmentPickerActions
+import me.rerere.rikkahub.ui.pages.chat.VoiceConversationModeScreen
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.context.Navigator
@@ -160,6 +161,11 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
 
     val startVoiceMode = rememberVoiceModeStarter(vm, setting)
 
+    // VCM (Voice Conversation Mode) - the hands-free speak/listen loop. Unlike the plain
+    // voice mode above it does not require server-side VAD, so it works on Groq and any
+    // other one-shot OpenAI-compatible ASR provider.
+    var voiceConversationActive by remember { mutableStateOf(false) }
+
     val inputState = vm.inputState
 
     // 初始化输入状态（处理传入的 files 和 text 参数）
@@ -236,6 +242,8 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                     errors = errors,
                     onDismissError = { vm.dismissError(it) },
                     onClearAllErrors = { vm.clearAllErrors() },
+                    onStartVoiceConversation = { voiceConversationActive = true },
+                    voiceConversationActive = voiceConversationActive,
                 )
             }
         }
@@ -271,6 +279,8 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                     errors = errors,
                     onDismissError = { vm.dismissError(it) },
                     onClearAllErrors = { vm.clearAllErrors() },
+                    onStartVoiceConversation = { voiceConversationActive = true },
+                    voiceConversationActive = voiceConversationActive,
                 )
             }
             BackHandler(drawerState.isOpen) {
@@ -334,6 +344,8 @@ private fun ChatPageContent(
     errors: List<ChatError>,
     onDismissError: (Uuid) -> Unit,
     onClearAllErrors: () -> Unit,
+    onStartVoiceConversation: () -> Unit,
+    voiceConversationActive: Boolean = false,
 ) {
     val scope = rememberCoroutineScope()
     val toaster = LocalToaster.current
@@ -503,6 +515,8 @@ private fun ChatPageContent(
                     onMoreClick = {
                         showFilesSheet = true
                     },
+                    onStartVoiceConversation = onStartVoiceConversation,
+                    voiceConversationActive = voiceConversationActive,
                 )
             },
             containerColor = Color.Transparent,
@@ -598,6 +612,13 @@ private fun ChatPageContent(
                 attachmentPickerActions = attachmentPickerActions,
                 onStartVoiceMode = onStartVoiceMode,
                 onDismiss = { showFilesSheet = false },
+            )
+        }
+
+        if (voiceConversationActive) {
+            VoiceConversationModeHost(
+                conversationId = conversation.id,
+                onDismiss = { voiceConversationActive = false },
             )
         }
     }
