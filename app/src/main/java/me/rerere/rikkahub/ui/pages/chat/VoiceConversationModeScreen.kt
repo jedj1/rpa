@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -26,11 +25,9 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -40,13 +37,9 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import me.rerere.asr.ASRStatus
 import me.rerere.asr.VoiceModeStatus
-import me.rerere.rikkahub.R
 import me.rerere.rikkahub.ui.theme.LocalDarkMode
 import kotlin.math.PI
 import kotlin.math.cos
@@ -64,6 +57,12 @@ import kotlin.math.sin
  * motion and colour track the session state, drifting on the app's own
  * [me.rerere.rikkahub.ui.pages.chat.MeshGradientBackground] palette so it does not look
  * bolted on.
+ *
+ * Strings here are literals rather than `R.string.*` on purpose. `strings.xml` is ~260KB,
+ * and this screen's four state labels plus the close and interrupt hints have no
+ * translations to preserve (the project ships English only), so there is nothing to
+ * localise and no reason to grow a shared resource file for them. This mirrors how
+ * DashScopeStreamingASRConfiguration already handles its provider-specific labels.
  */
 
 /** What the orb is doing, which drives both its colour and its motion. */
@@ -72,9 +71,10 @@ enum class OrbState { Listening, Thinking, Speaking, Failed }
 /**
  * The breathing ink orb.
  *
- * Motion is driven by a phase accumulator rather than `rememberInfiniteTransition`, so it
- * advances at a fixed ~30fps instead of every display vsync, and it stops when the caller
- * stops recomposing (a `remember` time source, not an animation-clock dependency).
+ * Motion reads the wall clock at draw time rather than using
+ * `rememberInfiniteTransition`, which would recompute on every display vsync (120fps on a
+ * 120Hz screen even while idle). Reading the clock inside the draw lambda means the state
+ * changes only trigger a redraw, not a recomposition.
  *
  * The blob is a sum of three radial gradients on slightly offset trajectories, which is
  * what gives it the "liquid ink" look — a single circle reads as a loading spinner instead.
@@ -117,7 +117,7 @@ fun VoiceOrb(
 
         // Ink blobs: each on its own slow circular drift, so the sum is never static.
         val drift = r * 0.10f
-        fun blob(phase: Float, radiusScale: Float, color: Color, alpha: Float, cap: StrokeCap = StrokeCap.Round) {
+        fun blob(phase: Float, radiusScale: Float, color: Color, alpha: Float) {
             val ox = cx + sin(t * 0.55f + phase) * drift
             val oy = cy + cos(t * 0.7f + phase) * drift
             drawCircle(
@@ -174,9 +174,10 @@ fun VoiceWaveform(
 /**
  * The VCM screen.
  *
- * [state] is the [me.rerere.asr.VoiceModeState] owned by the session controller; [asrState]
- * is the live ASR stream, used here only for its amplitude ring (the orb reacts to the
- * user's voice in real time, which is what makes it feel alive).
+ * [state] is the [me.rerere.asr.VoiceModeState] owned by the session controller; [amplitudes]
+ * is the live ASR amplitude ring, used so the orb reacts to the user's voice in real time —
+ * that reaction is what makes it feel alive rather than decorative, and it costs nothing
+ * because every ASR controller already computes the ring.
  */
 @Composable
 fun VoiceConversationModeScreen(
@@ -221,13 +222,13 @@ fun VoiceConversationModeScreen(
                 IconButton(onClick = onEnd, modifier = Modifier.size(48.dp)) {
                     Icon(
                         Icons.Filled.Close,
-                        contentDescription = stringResource(R.string.close),
+                        contentDescription = "Close",
                         tint = MaterialTheme.colorScheme.onSurface,
                     )
                 }
             }
 
-            // Middle: the orb, with the live transcript beneath it.
+            // Middle: the orb, with the live waveform around it.
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(48.dp),
@@ -277,11 +278,10 @@ fun VoiceConversationModeScreen(
 
                 Text(
                     text = when (state.status) {
-                        VoiceModeStatus.Listening -> stringResource(R.string.voice_conversation_listening)
-                        VoiceModeStatus.Thinking -> stringResource(R.string.voice_conversation_thinking)
-                        VoiceModeStatus.Speaking -> stringResource(R.string.voice_conversation_speaking)
-                        VoiceModeStatus.Failed -> state.errorMessage
-                            ?: stringResource(R.string.voice_conversation_error)
+                        VoiceModeStatus.Listening -> "Listening…"
+                        VoiceModeStatus.Thinking -> "Thinking…"
+                        VoiceModeStatus.Speaking -> "Speaking…"
+                        VoiceModeStatus.Failed -> state.errorMessage ?: "Voice conversation mode stopped"
                         VoiceModeStatus.Idle -> ""
                     },
                     style = MaterialTheme.typography.titleMedium,
@@ -293,7 +293,7 @@ fun VoiceConversationModeScreen(
                 // discoverable otherwise and it is the whole point of the mode.
                 if (state.isSpeaking) {
                     Text(
-                        text = stringResource(R.string.voice_conversation_interrupt_hint),
+                        text = "Speak any time to interrupt",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                         textAlign = TextAlign.Center,
