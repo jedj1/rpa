@@ -79,7 +79,6 @@ import me.rerere.rikkahub.ui.components.ai.FilesPicker
 import me.rerere.rikkahub.ui.components.ai.SearchMode
 import me.rerere.rikkahub.ui.components.ai.completion.WorkspaceCompletionProvider
 import me.rerere.rikkahub.ui.components.ai.rememberChatAttachmentPickerActions
-import me.rerere.rikkahub.ui.pages.chat.VoiceConversationModeScreen
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.context.Navigator
@@ -244,6 +243,7 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                     onClearAllErrors = { vm.clearAllErrors() },
                     onStartVoiceConversation = { voiceConversationActive = true },
                     voiceConversationActive = voiceConversationActive,
+                    onExitVoiceConversation = { voiceConversationActive = false },
                 )
             }
         }
@@ -281,6 +281,7 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                     onClearAllErrors = { vm.clearAllErrors() },
                     onStartVoiceConversation = { voiceConversationActive = true },
                     voiceConversationActive = voiceConversationActive,
+                    onExitVoiceConversation = { voiceConversationActive = false },
                 )
             }
             BackHandler(drawerState.isOpen) {
@@ -346,6 +347,7 @@ private fun ChatPageContent(
     onClearAllErrors: () -> Unit,
     onStartVoiceConversation: () -> Unit,
     voiceConversationActive: Boolean = false,
+    onExitVoiceConversation: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val toaster = LocalToaster.current
@@ -618,7 +620,7 @@ private fun ChatPageContent(
         if (voiceConversationActive) {
             VoiceConversationModeHost(
                 conversationId = conversation.id,
-                onDismiss = { voiceConversationActive = false },
+                onDismiss = onExitVoiceConversation,
             )
         }
     }
