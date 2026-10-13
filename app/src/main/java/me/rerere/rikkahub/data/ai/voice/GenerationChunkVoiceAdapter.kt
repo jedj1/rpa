@@ -1,7 +1,7 @@
 package me.rerere.rikkahub.data.ai.voice
 
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.transform
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
@@ -30,26 +30,33 @@ import me.rerere.asr.Chunk
  * If the assistant text is ever rewritten *shorter* (context compaction, or a fresh
  * assistant message after a tool call), the new text is emitted in full and the offset
  * resynchronised. Silently dropping it would mean the user never hears what replaced it.
+ *
+ * Uses [transform] rather than `flow { }` + `collect`: the outer receiver inside a `flow {}`
+ * builder is the `ProducerScope`, so there is no way to reach the source Flow from there
+ * and call `collect` on it — which is exactly the compile error the earlier `flow {}` version
+ * produced. `transform` already puts the upstream value in hand.
  */
-fun GenerationChunk.toVoiceChunks(): Flow<Chunk> = flow {
-    var emittedChars = 0
-    this@toVoiceChunks.collect { chunk ->
-        val messages = (chunk as? GenerationChunk.Messages)?.messages ?: return@collect
-        val assistant = messages.lastOrNull { it.role == MessageRole.ASSISTANT } ?: return@collect
+fun GenerationChunk.toVoiceChunks(): Flow<Chunk> = transform { chunk ->
+    if (chunk !is GenerationChunk.Messages) return@transform
+    val messages = chunk.messages
+    val assistant = messages.lastOrNull { it.role == MessageRole.ASSISTANT } ?: return@transform
 
-        val text = assistant.parts
-            .filterIsInstance<UIMessagePart.Text>()
-            .joinToString(separator = "") { it.text }
+    val text = assistant.parts
+        .filterIsInstance<UIMessagePart.Text>()
+        .joinToString(separator = "") { it.text }
 
-        if (text.length > emittedChars) {
-            emit(Chunk.Text(text.substring(emittedChars)))
-        } else if (text.isNotEmpty() && text.length < emittedChars) {
-            emit(Chunk.Text(text))
-        }
-        emittedChars = text.length
+    val delta = when {
+        text.length > emittedChars -> text.substring(emittedChars)
+        // Rewritten shorter: speak the new text, do not lose it.
+        text.isNotEmpty() && text.length < emittedChars -> text
+        else -> null
     }
-    emit(Chunk.Finished)
+    if (delta != null && delta.isNotEmpty()) emit(Chunk.Text(delta))
+    emittedChars = text.length
 }
+
+/** State carried across emissions; declared out of the transform for clarity. */
+private var emittedChars: Int = 0
 
 /** Convenience: one voice turn's utterance, as a user [UIMessage]. */
 fun voiceUtteranceMessage(utterance: String): UIMessage = UIMessage.user(utterance)
