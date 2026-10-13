@@ -2,6 +2,7 @@ package me.rerere.rikkahub.data.ai.voice
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import me.rerere.ai.core.MessageRole
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.ai.GenerationChunk
@@ -23,8 +24,8 @@ import me.rerere.asr.Chunk
  * user and tool messages alongside the assistant's, and reading the "last message" blindly
  * would speak the user's own words back to them.
  *
- * The last assistant message is found with a reverse scan rather than `.last()`, because a
- * completed tool call emits a trailing tool-role message.
+ * The last assistant message is found with [lastOrNull] over the whole list rather than
+ * `.last()`, because a completed tool call emits a trailing tool-role message.
  *
  * If the assistant text is ever rewritten *shorter* (context compaction, or a fresh
  * assistant message after a tool call), the new text is emitted in full and the offset
@@ -32,10 +33,9 @@ import me.rerere.asr.Chunk
  */
 fun GenerationChunk.toVoiceChunks(): Flow<Chunk> = flow {
     var emittedChars = 0
-    collect@ for (chunk in this@toVoiceChunks) {
-        val messages = (chunk as? GenerationChunk.Messages)?.messages ?: continue@collect
-        val assistant = messages.lastOrNull { it.role == me.rerere.ai.core.MessageRole.ASSISTANT }
-            ?: continue@collect
+    this@toVoiceChunks.collect { chunk ->
+        val messages = (chunk as? GenerationChunk.Messages)?.messages ?: return@collect
+        val assistant = messages.lastOrNull { it.role == MessageRole.ASSISTANT } ?: return@collect
 
         val text = assistant.parts
             .filterIsInstance<UIMessagePart.Text>()
@@ -51,5 +51,5 @@ fun GenerationChunk.toVoiceChunks(): Flow<Chunk> = flow {
     emit(Chunk.Finished)
 }
 
-/** Convenience: the voice turn's utterance, as a user [UIMessage]. */
+/** Convenience: one voice turn's utterance, as a user [UIMessage]. */
 fun voiceUtteranceMessage(utterance: String): UIMessage = UIMessage.user(utterance)
