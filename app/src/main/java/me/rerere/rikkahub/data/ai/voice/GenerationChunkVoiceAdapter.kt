@@ -37,28 +37,39 @@ import me.rerere.asr.Chunk
  * which leaked across every call site — a second voice turn started already "ahead" by
  * whatever the first one emitted, and two concurrent sessions corrupted each other.
  * Collecting the returned Flow a second time must start from zero.
+ *
+ * **`source` is hoisted out of the lambda on purpose.** Inside a `flow {}` block the
+ * implicit receiver is the `ProducerScope`, which shadows the extension receiver — so
+ * `this@toVoiceChunks.collect { }` does not resolve and produces a "receiver type mismatch"
+ * plus cascading type-inference failures. Capturing `val source = this` in the enclosing
+ * function body reaches the Flow through a plain value instead, which always resolves. The
+ * `collect` import is required too, since this project imports that extension explicitly
+ * everywhere (see ImageGenerationTools.kt, GeminiProvider.kt).
  */
-fun GenerationChunk.toVoiceChunks(): Flow<Chunk> = flow {
-    var emittedChars = 0
-    this@toVoiceChunks.collect { chunk ->
-        if (chunk !is GenerationChunk.Messages) return@collect
-        val assistant = chunk.messages.lastOrNull { it.role == MessageRole.ASSISTANT }
-            ?: return@collect
+fun GenerationChunk.toVoiceChunks(): Flow<Chunk> {
+    val source = this
+    return flow {
+        var emittedChars = 0
+        source.collect { chunk ->
+            if (chunk !is GenerationChunk.Messages) return@collect
+            val assistant = chunk.messages.lastOrNull { it.role == MessageRole.ASSISTANT }
+                ?: return@collect
 
-        val text = assistant.parts
-            .filterIsInstance<UIMessagePart.Text>()
-            .joinToString(separator = "") { it.text }
+            val text = assistant.parts
+                .filterIsInstance<UIMessagePart.Text>()
+                .joinToString(separator = "") { it.text }
 
-        val delta = when {
-            text.length > emittedChars -> text.substring(emittedChars)
-            // Rewritten shorter: speak the new text rather than losing it.
-            text.isNotEmpty() && text.length < emittedChars -> text
-            else -> null
+            val delta = when {
+                text.length > emittedChars -> text.substring(emittedChars)
+                // Rewritten shorter: speak the new text rather than losing it.
+                text.isNotEmpty() && text.length < emittedChars -> text
+                else -> null
+            }
+            if (delta != null && delta.isNotEmpty()) emit(Chunk.Text(delta))
+            emittedChars = text.length
         }
-        if (delta != null && delta.isNotEmpty()) emit(Chunk.Text(delta))
-        emittedChars = text.length
+        emit(Chunk.Finished)
     }
-    emit(Chunk.Finished)
 }
 
 /** Convenience: one voice turn's utterance, as a user [UIMessage]. */
