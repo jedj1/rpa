@@ -1,11 +1,14 @@
 package me.rerere.rikkahub.ui.pages.chat
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.rerere.asr.VoiceModeStatus
+import me.rerere.rikkahub.ui.components.ui.permission.PermissionManager
 import me.rerere.rikkahub.ui.components.ui.permission.PermissionRecordAudio
 import me.rerere.rikkahub.ui.components.ui.permission.rememberPermissionState
-import me.rerere.rikkahub.ui.components.ui.permission.PermissionManager
+import me.rerere.rikkahub.ui.context.LocalASRState
 import kotlin.uuid.Uuid
 
 /**
@@ -44,11 +47,11 @@ fun VoiceConversationModeHost(
     // Starting from a composable effect rather than from the session's constructor keeps
     // the ASR/TTS handles (which are themselves remembered) established before the
     // recogniser begins.
-    androidx.compose.runtime.LaunchedEffect(session) {
+    LaunchedEffect(session) {
         session.start()
     }
 
-    val asr = me.rerere.rikkahub.ui.context.LocalASRState.current
+    val asr = LocalASRState.current
     val asrState by asr.state.collectAsStateWithLifecycle()
 
     VoiceConversationModeScreen(
