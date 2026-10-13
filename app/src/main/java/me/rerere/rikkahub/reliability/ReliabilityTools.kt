@@ -81,7 +81,7 @@ fun generateBugReportTool(context: Context, builder: BugReportBuilder): Tool = T
         val zip = builder.build()
         val authority = "${context.packageName}.fileprovider"
         val uri = runCatching {
-            FileProvider.getUriForFile(context, authority, uri)
+            FileProvider.getUriForFile(context, authority, zip)
         }.getOrNull()
         val payload = buildJsonObject {
             put("ok", true)
